@@ -12,8 +12,8 @@ library(DT)
 library(shinythemes)
 
 # --- PATHS (Adjust your paths here) ---
-PATH_FOLDER <- "D:/Users/Jonatan Castillo/betalainasR/Cromatogramas Experimentales/"
-PATH_TEO    <- "D:/Users/Jonatan Castillo/betalainasR/teo.xlsx"
+PATH_FOLDER <- ""
+PATH_TEO    <- "teo.xlsx"
 
 # ==========================================
 # 2. AUXILIARY FUNCTIONS
