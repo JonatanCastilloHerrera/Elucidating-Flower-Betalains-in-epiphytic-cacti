@@ -1,0 +1,875 @@
+# ==========================================
+# 1. LIBRARIES AND CONFIGURATION
+# ==========================================
+library(shiny)
+library(readxl)
+library(tidyverse)
+library(plotly)
+library(writexl)
+library(stringr)
+library(readr)
+library(DT)
+library(shinythemes)
+
+# --- PATHS (Adjust your paths here) ---
+PATH_FOLDER <- "D:/Users/Jonatan Castillo/betalainasR/Cromatogramas Experimentales/"
+PATH_TEO    <- "D:/Users/Jonatan Castillo/betalainasR/teo.xlsx"
+
+# ==========================================
+# 2. AUXILIARY FUNCTIONS
+# ==========================================
+
+# FIX #6 (Updated): Cleaning "-betaxanthin" and "-bx" suffixes
+clean_chem_names <- function(names) {
+  names %>%
+    str_remove_all("\\s*\\([^)]*\\)") %>%
+    str_replace_all("(?i)\\bdecarboxy\\b", "Decarboxy") %>%
+    str_replace_all("(?i)\\bdehydro\\b",   "Dehydro")   %>%
+    str_replace_all("(?i)\\biso\\b",        "Iso")        %>%
+    str_replace_all("(?i)\\bneo\\b",        "Neo")        %>%
+    str_replace_all("(?i)\\bbidecarboxy\\b","Bidecarboxy") %>%
+    str_replace_all("(?i)-betaxanthin$", "") %>%  # Removes full word
+    str_replace_all("-bx$",   "")   %>%
+    str_replace_all(" acid",  "")   %>%
+    str_replace_all("_",      " ")  %>%
+    str_trim()                      %>%
+    str_to_title()
+}
+
+base_names_ordered <- c(
+  "isoprebetanin", "prebetanin", "isorivinianin", "rivinianin", "isolampranthin i", "lampranthin i",
+  "isolampranthin ii", "lampranthin ii", "neolampranthin", "lampranthin", "isohylocerenin", "hylocerenin",
+  "neohylocerenin", "isophyllocactin", "phyllocactin", "neophyllocactin", "isobetanin", "betanin",
+  "betanidin", "neobetanin", "isoamaranthin", "amaranthin", "neoamaranthin", "isoiresinin", "iresinin",
+  "isocelosianin", "celosianin", "isomelocactin", "melocactin", "isobougainvillein", "bougainvillein",
+  "isomammillarinin", "mammillarinin", "isoapiocactin", "apiocactin", "isogomphrenin", "gomphrenin",
+  "neogomphrenin", "isoglabranin", "glabranin", "isocoumglabranin", "coumglabranin", "neocoumglabranin",
+  "isocafglabranin", "cafglabranin", "bicoumglabranin", "histamine", "histidine", "arginine", "lysine",
+  "glutamine", "asparagine", "threonine", "serine", "aspartic acid", "glutamic acid", "alanine", "valine",
+  "isoleucine", "leucine", "methionine", "phenylalanine", "tyrosine", "tryptophan", "glycine", "cysteine",
+  "proline", "dopamine", "l-dopa", "tyramine", "vulgaxanthin", "miraxanthin", "portulacaxanthin",
+  "dopaxanthin", "indicaxanthin", "muscaaurin", "spinacene"
+)
+base_names_ordered <- base_names_ordered[order(nchar(base_names_ordered), decreasing = TRUE)]
+
+classify_base_molecule <- function(name) {
+  name_lower <- tolower(name)
+  for (base in base_names_ordered) {
+    if (grepl(base, name_lower, fixed = TRUE)) return(str_to_title(base))
+  }
+  return("Others")
+}
+
+# ==========================================
+# STRUCTURAL FEATURES
+# ==========================================
+get_structural_features <- function(molecules) {
+  lapply(molecules, function(m) {
+    name_lower <- tolower(m)
+    feats  <- c()
+    
+    # Every betalain shares the betalamic acid chromophore
+    feats <- c(feats, "Betalamic Acid")
+    
+    is_betaxanthin <- grepl(
+      "bx|xanthin|dopa|amine|arginine|lysine|glutamine|glutamic|asparagine|aspartic|
+       threonine|serine|alanine|valine|isoleucine|leucine|methionine|phenylalanine|
+       tyrosine|tryptophan|glycine|cysteine|proline|histamine|histidine|muscaaurin|spinacene|aminobutyric",
+      name_lower
+    )
+    
+    if (is_betaxanthin) {
+      # Added: aminobutyric to catch GABA
+      if (grepl("dopamine|tyramine|histamine|gaba|aminobutyric|l-dopa|dopaxanthin|miraxanthin iii|miraxanthin v", name_lower)) {
+        feats <- c(feats, "Biogenic Amines (Dopamine, L-DOPA...)")
+      } else if (grepl("phenylalanine|tyrosine|tryptophan|portulacaxanthin", name_lower)) {
+        feats <- c(feats, "Aromatic AAs (Phe, Tyr, Trp)")
+      } else if (grepl("arginine|lysine|histidine|glutamine|glutamic|asparagine|aspartic|threonine|serine|cysteine|vulgaxanthin|muscaaurin|miraxanthin ii", name_lower)) {
+        feats <- c(feats, "Polar/Charged AAs (Glu, Arg, Ser...)")
+      } else {
+        feats <- c(feats, "Aliphatic AAs (Pro, Leu, Val...)")
+      }
+      
+    } else {
+      # --- Betacyanin core ---
+      feats <- c(feats, "Cyclo-DOPA (Betacyanin Base)")
+      
+      if (!grepl("betanidin", name_lower)) {
+        feats <- c(feats, "Glucose (1)")
+        if (grepl("glabranin|bougainvillein", name_lower)) {
+          feats <- c(feats, "Glucose (2)")
+        }
+        if (grepl("apiosyl|apiocactin", name_lower)) feats <- c(feats, "Apiose")
+        if (grepl("rhamnosyl", name_lower))          feats <- c(feats, "Rhamnose")
+        if (grepl("amaranthin|celosianin|iresinin|rivinianin", name_lower)) {
+          feats <- c(feats, "Glucuronic Acid")
+        }
+      }
+    }
+    
+    # --- Acyl / ester substituents ---
+    if (grepl("biferuloyl", name_lower)) {
+      feats <- c(feats, "Ferulic Acid (1)", "Ferulic Acid (2)")
+    } else if (grepl("feruloyl|celosianin ii|gomphrenin[- ]iii", name_lower)) { # Added hyphen check
+      feats <- c(feats, "Ferulic Acid (1)")
+    }
+    
+    if (grepl("bicoum", name_lower)) {
+      feats <- c(feats, "p-Coumaric Acid (1)", "p-Coumaric Acid (2)")
+    } else if (grepl("coumaroyl|coumglabranin|celosianin i|gomphrenin[- ]iv", name_lower)) { # Added hyphen check
+      feats <- c(feats, "p-Coumaric Acid (1)")
+    }
+    
+    if (grepl("bimalonyl", name_lower)) {
+      feats <- c(feats, "Malonic Acid (1)", "Malonic Acid (2)")
+    } else if (grepl("malonyl|phyllocactin|lampranthin|gomphrenin[- ]ii", name_lower)) { # Added hyphen check
+      feats <- c(feats, "Malonic Acid (1)")
+    }
+    
+    if (grepl("hylocerenin", name_lower))  feats <- c(feats, "HMG Acid")
+    if (grepl("sinapoyl",   name_lower))   feats <- c(feats, "Sinapic Acid")
+    if (grepl("caffeoyl|cafglabranin", name_lower)) feats <- c(feats, "Caffeic Acid")
+    if (grepl("sulfated|prebetanin|rivinianin", name_lower)) feats <- c(feats, "Sulfate Group")
+    
+    # --- Oxidative/reductive modifications ---
+    # Added rule for tridecarboxylation
+    if (grepl("tridecarboxy", name_lower)) {
+      feats <- c(feats, "-CO2 (1)", "-CO2 (2)", "-CO2 (3)")
+    } else if (grepl("bidecarboxy", name_lower)) {
+      feats <- c(feats, "-CO2 (1)", "-CO2 (2)")
+    } else if (grepl("decarboxy", name_lower)) {
+      feats <- c(feats, "-CO2 (1)")
+    }
+    
+    if (grepl("\\bdehydro\\b", name_lower) || grepl("\\bneobetanin\\b", name_lower)) {
+      feats <- c(feats, "-H2 (Dehydrogenation)")
+    }
+    if (grepl("\\bneo\\b", name_lower) && !grepl("\\bneobetanin\\b", name_lower)) {
+      feats <- c(feats, "C-15 Epimer")
+    }
+    
+    if (length(feats) == 0) return(NULL)
+    data.frame(Molecule_Clean = m, Feature = feats, stringsAsFactors = FALSE)
+  }) %>%
+    bind_rows() %>%
+    mutate(Value = 1)
+}
+
+sort_phylogenetic_species <- function(sps) {
+  ordered <- c()
+  if (any(str_detect(tolower(sps), "macranthus")))    ordered <- c(ordered, sps[str_detect(tolower(sps), "macranthus")])
+  if (any(str_detect(tolower(sps), "bud")))           ordered <- c(ordered, sps[str_detect(tolower(sps), "bud")])
+  if (any(str_detect(tolower(sps), "eichlam")))       ordered <- c(ordered, sps[str_detect(tolower(sps), "eichlam")])
+  if (any(str_detect(tolower(sps), "anthesis")))      ordered <- c(ordered, sps[str_detect(tolower(sps), "anthesis")])
+  if (any(str_detect(tolower(sps), "flagelliformis")))ordered <- c(ordered, sps[str_detect(tolower(sps), "flagelliformis")])
+  others <- setdiff(sps, ordered)
+  return(c(ordered, others))
+}
+
+# --- MASTER FUNCTION: ANNOTATED SCATTER & STRUCTURAL HEATMAP ---
+generate_annotated_heatmap <- function(df_heat, mol_order, species_order, mol_masses, marker_scale = 1.0) {
+  p_main <- plot_ly()
+  
+  max_z <- max(df_heat$Z_Value, na.rm = TRUE)
+  
+  df_markers <- df_heat %>%
+    filter(!is.na(Z_Value) & Z_Value > 0) %>%
+    mutate(
+      Molecule_Clean = factor(Molecule_Clean, levels = mol_order),
+      Species        = factor(Species,        levels = species_order),
+      Marker_Color   = case_when(
+        grepl("cyan", tolower(Family)) ~ "rgba(236, 0, 140, 0.85)",
+        grepl("xant", tolower(Family)) ~ "rgba(255, 242, 0, 0.85)",
+        TRUE                           ~ "rgba(0, 174, 239, 0.85)"
+      ),
+      Marker_Size = if (max_z > 0) { 4 + (sqrt(Z_Value / max_z) * 26 * marker_scale) } else { 8 }
+    )
+  
+  if (nrow(df_markers) > 0) {
+    p_main <- p_main %>% add_trace(
+      data = df_markers, x = ~Molecule_Clean, y = ~Species,
+      type = "scatter", mode = "markers",
+      marker = list(
+        size      = ~Marker_Size,
+        color     = ~Marker_Color,
+        line      = list(color = "#17202A", width = 1.5),
+        sizemode  = "diameter"
+      ),
+      hoverinfo = "text", text = ~Hover_Text, showlegend = FALSE
+    )
+  }
+  
+  p_main <- p_main %>%
+    layout(
+      xaxis = list(
+        categoryorder = "array", categoryarray = mol_order,
+        tickmode = "array", tickvals = mol_order, ticktext = mol_order,
+        title = "", tickangle = -45,
+        showline = TRUE, mirror = TRUE, linecolor = "black", linewidth = 1.5,
+        tickfont = list(family = "Arial", size = 11, color = "black"),
+        showgrid = TRUE, gridcolor = "#E5E8E8", gridwidth = 1.5
+      ),
+      yaxis = list(
+        categoryorder = "array", categoryarray = species_order, autorange = "reversed",
+        title = "",
+        showline = TRUE, mirror = TRUE, linecolor = "black", linewidth = 1.5,
+        tickfont = list(family = "Arial", size = 11, color = "black"),
+        showgrid = TRUE, gridcolor = "#E5E8E8", gridwidth = 1.5
+      ),
+      plot_bgcolor = "#ffffff", paper_bgcolor = "#ffffff"
+    )
+  
+  all_feat_levels <- c(
+    "Betalamic Acid",
+    "Cyclo-DOPA (Betacyanin Base)",
+    "Biogenic Amines (Dopamine, L-DOPA...)",
+    "Aromatic AAs (Phe, Tyr, Trp)",
+    "Polar/Charged AAs (Glu, Arg, Ser...)",
+    "Aliphatic AAs (Pro, Leu, Val...)",
+    "Glucose (1)", "Glucose (2)", "Apiose", "Rhamnose", "Glucuronic Acid",
+    "Malonic Acid (1)", "Malonic Acid (2)", "HMG Acid",
+    "Ferulic Acid (1)", "Ferulic Acid (2)",
+    "p-Coumaric Acid (1)", "p-Coumaric Acid (2)",
+    "Sinapic Acid", "Caffeic Acid",
+    "Sulfate Group",
+    "-CO2 (1)", "-CO2 (2)", "-CO2 (3)",   # Added tridecarboxylation
+    "-H2 (Dehydrogenation)",
+    "C-15 Epimer"
+  )
+  
+  struct_df <- get_structural_features(mol_order)
+  
+  if (is.null(struct_df) || nrow(struct_df) == 0) {
+    present_features <- "Betalamic Acid"
+    struct_df <- data.frame(Molecule_Clean = mol_order, Feature = "Betalamic Acid", Value = 0)
+  } else {
+    present_features <- intersect(all_feat_levels, unique(struct_df$Feature))
+  }
+  
+  struct_df$Feature <- factor(struct_df$Feature, levels = present_features)
+  struct_df <- struct_df %>%
+    complete(
+      Molecule_Clean = factor(mol_order, levels = mol_order),
+      Feature        = factor(present_features, levels = present_features),
+      fill           = list(Value = 0)
+    )
+  
+  p_struct <- plot_ly() %>% add_heatmap(
+    data       = struct_df, x = ~Molecule_Clean, y = ~Feature, z = ~Value,
+    colorscale = list(c(0, "#F4F6F6"), c(1, "#154360")),
+    zmin = 0, zmax = 1, showscale = FALSE,
+    xgap = 2, ygap = 2,
+    hoverinfo = "text",
+    text = ~paste("<b>", Molecule_Clean, "</b><br>Block:", Feature)
+  )
+  
+  mass_labels    <- sapply(mol_masses, function(m) if (is.na(m)) "-" else as.character(round(m, 1)))
+  combined_labels <- paste0(mass_labels, " - ", mol_order)
+  
+  subplot(p_main, p_struct, nrows = 2, shareX = FALSE, heights = c(0.45, 0.55), margin = 0.12) %>%
+    layout(
+      plot_bgcolor = "#ffffff", paper_bgcolor = "#ffffff",
+      margin = list(b = 220, l = 220, t = 40, r = 60),
+      xaxis2 = list(
+        categoryorder = "array", categoryarray = mol_order, matches = "x",
+        tickmode = "array", tickvals = mol_order, ticktext = combined_labels,
+        title = "", tickangle = -60,
+        showline = TRUE, mirror = TRUE, linecolor = "black", linewidth = 1.5,
+        tickfont = list(family = "Arial", size = 10, color = "black"),
+        showgrid = TRUE, gridcolor = "#E5E8E8"
+      ),
+      yaxis2 = list(
+        title = "", categoryorder = "array", categoryarray = present_features,
+        autorange = "reversed",
+        tickfont  = list(family = "Arial", size = 10, color = "black"),
+        showline  = TRUE, mirror = TRUE, linecolor = "black", linewidth = 1.5
+      )
+    ) %>%
+    config(displayModeBar = TRUE)
+}
+
+# ==========================================
+# 3. UI
+# ==========================================
+ui <- fluidPage(
+  theme = shinytheme("flatly"),
+  tags$head(tags$style(HTML("
+    body { background-color: #FFFFFF; }
+    .well { background-color: #F8F9F9; border: 1px solid #ddd; box-shadow: none; }
+  "))),
+  
+  titlePanel("Chemotaxonomic Profiling of Betalains"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      width = 3,
+      h4("Global Filters"),
+      wellPanel(textOutput("statusMessage")),
+      
+      hr(style = "border-color: #2ECC71;"),
+      h5("Tissue Normalization Applied", style = "color: #2ECC71; font-weight: bold;"),
+      helpText("Detected raw areas are divided by the initial fresh weight (FW) to calculate Area/g:"),
+      tags$ul(style = "font-size: 11px; margin-bottom: 0px;",
+              tags$li("D. macranthus: 27.5 g"),
+              tags$li("D. speciosus bud: 7.53 g"),
+              tags$li("D. eichlamii: 11.9 g"),
+              tags$li("D. speciosus anthesis: 48.0 g"),
+              tags$li("A. flagelliformis: 12.2 g")
+      ),
+      hr(style = "border-color: #2ECC71;"),
+      
+      h5("Tab 3 Options (Relative)", style = "color: #C71585; font-weight: bold;"),
+      selectInput("ref_molecule", "Reference Molecule:", choices = NULL),
+      selectInput("ref_species",  "Reference Species/Stage:", choices = NULL),
+      radioButtons("rel_scale_type", "Calculation Scale:",
+                   choices = c("Linear", "Logarithmic"), inline = TRUE),
+      
+      hr(style = "border-color: #3498DB;"),
+      h5("Bubble Size Control", style = "color: #3498DB; font-weight: bold;"),
+      sliderInput("marker_visual_scale", "Maximum Bubble Size Factor:",
+                  min = 0.5, max = 2.0, value = 1.0, step = 0.1),
+      helpText("Adjusts the maximum possible diameter to fit your screen size. Area scales proportionally to concentration."),
+      hr(style = "border-color: #3498DB;"),
+      
+      h5("Species"),
+      checkboxGroupInput("selected_species", NULL, choices = NULL),
+      fluidRow(
+        column(6, actionButton("select_all_sp",   "All")),
+        column(6, actionButton("deselect_all_sp", "None"))
+      ),
+      hr(),
+      
+      h5("Chemical Families"),
+      checkboxGroupInput("selected_groups", NULL, choices = NULL),
+      hr(),
+      
+      h5("Individual Molecules"),
+      fluidRow(
+        column(6, actionButton("sel_all_mols",  "All",  class = "btn-xs")),
+        column(6, actionButton("desel_all_mols","None", class = "btn-xs"))
+      ),
+      div(style = "max-height: 200px; overflow-y: auto; margin-top: 10px;
+                   border: 1px solid #ccc; padding: 5px;",
+          checkboxGroupInput("selected_molecules", NULL, choices = NULL)
+      ),
+      
+      hr(),
+      numericInput("min_area",   "Minimum Area:", value = 5000),
+      sliderInput( "tolerance",  "Tolerance (PPM):", min = 0, max = 50, value = 5),
+      
+      hr(),
+      h5("Grouping Options"),
+      checkboxInput("collapse_vars", "📦 Collapse derivatives (Sum by Base)", value = FALSE),
+      
+      hr(),
+      div(style = "background-color: #f9f9f9; padding: 12px; border-radius: 6px;
+                   font-size: 11px; border: 1px solid #e0e0e0;",
+          strong("Chart Legend (CMYK Scheme):"), br(),
+          span("●", style = "color: #EC008C;"), " Betacyanins (Magenta)", br(),
+          span("●", style = "color: #FFF200; -webkit-text-stroke: 1px rgba(0,0,0,0.5);"),
+          " Betaxanthins (Yellow)", br(),
+          span("●", style = "color: #00AEEF;"), " Others (Cyan)", br(),
+          span("■", style = "color: #154360;"), " Structural Modification (filled cell)", br(),
+          span("■", style = "color: #8CC63F;"), " C-15 Epimer (new — stereochemical variant)", br(), br(),
+          "The ", strong("area of the circle"), " is directly proportional to the calculated abundance."
+      ),
+      br(),
+      downloadButton("downloadData", "Export Excel", class = "btn-success")
+    ),
+    
+    mainPanel(
+      width = 9,
+      tabsetPanel(id = "main_tabs", selected = "tab_masa",
+                  tabPanel("1. Mass Order (m/z)", value = "tab_masa",
+                           br(), h4("Strictly Ordered by Molecular Weight (Algorithmic)"),
+                           uiOutput("heatmapMassContainer")),
+                  tabPanel("2. Normalized Data (Log10)", value = "tab_bruta",
+                           br(), h4("Area per Gram of Tissue (Logarithmic Scale)"),
+                           uiOutput("heatmapRawContainer")),
+                  tabPanel("3. Relative Area (Custom)", value = "tab_phyllo",
+                           br(), h4("100% = Selected Species and Molecule"),
+                           uiOutput("heatmapPhylloContainer")),
+                  tabPanel("4. Identification Table", value = "tab_table",
+                           br(), h4("Detailed Match Information (LC-MS)"),
+                           DTOutput("id_table")),
+                  tabPanel("5. Family Summary", value = "tab_family",
+                           br(), h4("Abundance Distribution by Chemical Family"),
+                           uiOutput("heatmapFamilyContainer")),
+                  tabPanel("6. Absolute Proportions", value = "tab_bars_abs",
+                           br(), h4("Total Sum of Families (Stacked Bar Chart)"),
+                           uiOutput("barplotFamilyContainer")),
+                  tabPanel("7. Percentage Comparison", value = "tab_bars_100",
+                           br(), h4("Relative Distribution (100% Stacked Bar Chart)"),
+                           uiOutput("barplotPercentContainer"))
+      )
+    )
+  )
+)
+
+# ==========================================
+# 4. SERVER
+# ==========================================
+server <- function(input, output, session) {
+  
+  raw_data <- reactive({
+    files <- list.files(PATH_FOLDER, pattern = "\\.csv$", full.names = TRUE)
+    if (length(files) == 0) return(NULL)
+    files <- files[!basename(files) %in% c("Af.csv", "Disocactus_speciosus.csv")]
+    
+    list_exp <- lapply(files, function(f) {
+      tryCatch({
+        df <- read_csv(f, col_types = cols(.default = "c"), show_col_types = FALSE)
+        if (ncol(df) < 10) return(NULL)
+        # Translated column names to English
+        colnames(df)[1:10] <- c("Peak", "Start", "RT", "End", "Height", "Area", "Pct_Area", "mz", "z", "Abundance")
+        df$species_name <- basename(f) %>%
+          str_remove("\\.csv$") %>% str_replace_all("_", " ")
+        df %>%
+          mutate(across(c(mz, Area, RT), ~as.numeric(str_remove_all(., ",")))) %>%
+          drop_na(mz, Area)
+      }, error = function(e) return(NULL))
+    })
+    
+    if (!file.exists(PATH_TEO)) return(NULL)
+    teo_raw <- read_excel(PATH_TEO, sheet = 1, col_types = "text")
+    colnames(teo_raw)[1:2] <- c("group", "molecule")
+    teo_raw$char_frag <- teo_raw[[3]]
+    
+    teo <- teo_raw %>%
+      pivot_longer(cols = -c(group, molecule, char_frag),
+                   names_to = "frag", values_to = "mz_teo") %>%
+      mutate(mz_teo    = as.numeric(mz_teo),
+             char_frag = as.numeric(char_frag)) %>%
+      drop_na(mz_teo)
+    
+    output$statusMessage <- renderText("System Online")
+    list(exp = bind_rows(list_exp), teo = teo)
+  })
+  
+  observe({
+    d <- raw_data()
+    if (!is.null(d)) {
+      ordered_sp <- sort_phylogenetic_species(unique(d$exp$species_name))
+      updateCheckboxGroupInput(session, "selected_species",
+                               choices = ordered_sp, selected = ordered_sp)
+      updateCheckboxGroupInput(session, "selected_groups",
+                               choices = unique(d$teo$group), selected = unique(d$teo$group))
+    }
+  })
+  
+  processed_data <- reactive({
+    req(input$selected_species, input$selected_groups)
+    d <- raw_data()
+    if (is.null(d)) return(data.frame())
+    
+    exp_sub <- d$exp %>%
+      filter(species_name %in% input$selected_species, Area >= input$min_area)
+    teo_sub <- d$teo %>%
+      filter(group %in% input$selected_groups)
+    
+    fw_table <- tribble(
+      ~pattern,          ~weight,
+      "macranthus",      27.5,
+      "bud",              7.53,
+      "eichlam",         11.9,
+      "speciosus",       48.0,
+      "flagelliformis",  12.2
+    )
+    
+    get_weight <- function(sp_name) {
+      sp_lower <- tolower(sp_name)
+      for (i in seq_len(nrow(fw_table))) {
+        if (grepl(fw_table$pattern[i], sp_lower, fixed = TRUE)) return(fw_table$weight[i])
+      }
+      return(1)
+    }
+    
+    matches <- vector("list", nrow(exp_sub))
+    for (i in seq_len(nrow(exp_sub))) {
+      err <- abs(teo_sub$mz_teo - exp_sub$mz[i]) / teo_sub$mz_teo * 1e6
+      if (min(err, na.rm = TRUE) <= input$tolerance) {
+        hit    <- which.min(err)
+        sp_name <- exp_sub$species_name[i]
+        weight  <- get_weight(sp_name)
+        
+        char_frag_val <- teo_sub$char_frag[hit]
+        
+        is_char <- !is.na(char_frag_val) &&
+          (abs(teo_sub$mz_teo[hit] - char_frag_val) / char_frag_val * 1e6 <= 10)
+        
+        matches[[i]] <- data.frame(
+          Species      = sp_name,
+          Raw_Area     = exp_sub$Area[i],
+          Weight_g     = weight,
+          Area         = exp_sub$Area[i] / weight,
+          Molecule     = teo_sub$molecule[hit],
+          Family       = teo_sub$group[hit],
+          Base         = classify_base_molecule(teo_sub$molecule[hit]),
+          Mass         = if (!is.na(char_frag_val)) char_frag_val else teo_sub$mz_teo[hit],
+          RT           = exp_sub$RT[i],
+          Exp_mz       = exp_sub$mz[i],
+          Teo_mz       = teo_sub$mz_teo[hit],
+          Frag_Type    = teo_sub$frag[hit],
+          Error_PPM    = min(err, na.rm = TRUE),
+          Is_Char_Frag = is_char
+        )
+      }
+    }
+    
+    matches <- Filter(Negate(is.null), matches)
+    if (length(matches) == 0) return(data.frame())
+    
+    bind_rows(matches) %>%
+      distinct() %>%
+      mutate(Molecule_Clean = clean_chem_names(Molecule))
+  })
+  
+  observe({
+    df <- processed_data()
+    if (!is.null(df) && nrow(df) > 0) {
+      mol_choices <- sort(unique(df$Molecule_Clean))
+      updateCheckboxGroupInput(session, "selected_molecules",
+                               choices = mol_choices, selected = mol_choices)
+      
+      sp_choices   <- sort_phylogenetic_species(unique(df$Species))
+      selected_mol <- if ("Phyllocactin" %in% mol_choices) "Phyllocactin" else mol_choices[1]
+      if (!is.null(input$ref_molecule) && input$ref_molecule %in% mol_choices)
+        selected_mol <- input$ref_molecule
+      
+      selected_sp <- sp_choices[1]
+      anthesis_match <- sp_choices[str_detect(tolower(sp_choices), "anthesis")]
+      if (length(anthesis_match) > 0) selected_sp <- anthesis_match[1]
+      if (!is.null(input$ref_species) && input$ref_species %in% sp_choices)
+        selected_sp <- input$ref_species
+      
+      updateSelectInput(session, "ref_molecule", choices = mol_choices, selected = selected_mol)
+      updateSelectInput(session, "ref_species",  choices = sp_choices,  selected = selected_sp)
+    }
+  })
+  
+  observeEvent(input$sel_all_mols, {
+    df <- processed_data(); req(df)
+    updateCheckboxGroupInput(session, "selected_molecules",
+                             selected = sort(unique(df$Molecule_Clean)))
+  })
+  observeEvent(input$desel_all_mols, {
+    updateCheckboxGroupInput(session, "selected_molecules", selected = character(0))
+  })
+  observeEvent(input$select_all_sp, {
+    d <- raw_data(); req(d)
+    updateCheckboxGroupInput(session, "selected_species",
+                             selected = sort_phylogenetic_species(unique(d$exp$species_name)))
+  })
+  observeEvent(input$deselect_all_sp, {
+    updateCheckboxGroupInput(session, "selected_species", selected = character(0))
+  })
+  
+  get_base_df <- reactive({
+    df <- processed_data()
+    req(nrow(df) > 0, input$selected_molecules)
+    
+    df <- df %>% filter(Molecule_Clean %in% input$selected_molecules)
+    
+    if (input$collapse_vars) {
+      df %>%
+        mutate(Molecule_Clean = Base) %>%
+        group_by(Molecule_Clean, Family, Species, Base) %>%
+        summarise(A = sum(Area, na.rm = TRUE),
+                  Mass = mean(Mass, na.rm = TRUE), .groups = "drop")
+    } else {
+      df %>%
+        group_by(Molecule_Clean, Family, Species, Base) %>%
+        arrange(desc(Is_Char_Frag), desc(Area)) %>%
+        slice(1) %>%
+        summarise(A = first(Area), Mass = first(Mass), .groups = "drop")
+    }
+  })
+  
+  get_safe_masses <- function(df_heat, mol_order) {
+    sapply(mol_order, function(m) {
+      val <- df_heat$Mass[df_heat$Molecule_Clean == m]
+      if (length(val) > 0 && !all(is.na(val))) val[1] else NA
+    })
+  }
+  
+  # --- Panels 1, 2, 3 (bubble heatmaps) ---
+  output$heatmapMassContainer <- renderUI({
+    h <- max(950, 500 + length(input$selected_species) * 50)
+    plotlyOutput("heatmapMassPlot", height = paste0(h, "px"))
+  })
+  output$heatmapMassPlot <- renderPlotly({
+    df_base <- get_base_df(); req(df_base)
+    df_heat <- df_base %>%
+      group_by(Species) %>%
+      mutate(Real_Value = (A / max(A, na.rm = TRUE)) * 100,
+             Z_Value    = log10(Real_Value + 1)) %>%
+      ungroup() %>%
+      arrange(Mass, Molecule_Clean) %>%
+      mutate(Hover_Text = paste("<b>", Molecule_Clean, "</b><br>Sp:", Species,
+                                "<br>Relative Area (%):", round(Real_Value, 2)))
+    mol_order     <- unique(df_heat$Molecule_Clean)
+    species_order <- sort_phylogenetic_species(unique(df_heat$Species))
+    mol_masses    <- get_safe_masses(df_heat, mol_order)
+    generate_annotated_heatmap(df_heat, mol_order, species_order, mol_masses,
+                               marker_scale = input$marker_visual_scale)
+  })
+  
+  output$heatmapRawContainer <- renderUI({
+    h <- max(950, 500 + length(input$selected_species) * 50)
+    plotlyOutput("heatmapRawPlot", height = paste0(h, "px"))
+  })
+  output$heatmapRawPlot <- renderPlotly({
+    df_base <- get_base_df(); req(df_base)
+    df_heat <- df_base %>%
+      mutate(Real_Value = A, Z_Value = log10(A)) %>%
+      arrange(Mass, Molecule_Clean) %>%
+      mutate(Hover_Text = paste("<b>", Molecule_Clean, "</b><br>Sp:", Species,
+                                "<br>Area/g FW:", format(Real_Value, scientific = TRUE, digits = 3)))
+    mol_order     <- unique(df_heat$Molecule_Clean)
+    species_order <- sort_phylogenetic_species(unique(df_heat$Species))
+    mol_masses    <- get_safe_masses(df_heat, mol_order)
+    generate_annotated_heatmap(df_heat, mol_order, species_order, mol_masses,
+                               marker_scale = input$marker_visual_scale)
+  })
+  
+  output$heatmapPhylloContainer <- renderUI({
+    h <- max(950, 500 + length(input$selected_species) * 50)
+    plotlyOutput("heatmapPhylloPlot", height = paste0(h, "px"))
+  })
+  output$heatmapPhylloPlot <- renderPlotly({
+    df_base <- get_base_df()
+    req(df_base, input$ref_molecule, input$ref_species, input$rel_scale_type)
+    ref_row  <- df_base %>%
+      filter(Molecule_Clean == input$ref_molecule, Species == input$ref_species)
+    ref_area <- if (nrow(ref_row) > 0) max(ref_row$A, na.rm = TRUE) else max(df_base$A, na.rm = TRUE)
+    df_heat <- df_base %>%
+      mutate(
+        Real_Value  = (A / ref_area) * 100,
+        Z_Value     = if (input$rel_scale_type == "Logarithmic") log10(Real_Value + 1) else Real_Value,
+        Family_Sort = case_when(
+          grepl("xant", tolower(Family)) ~ 1,
+          grepl("cyan", tolower(Family)) ~ 2,
+          TRUE ~ 3
+        )
+      ) %>%
+      arrange(Family_Sort, Mass, Molecule_Clean) %>%
+      mutate(Hover_Text = paste("<b>", Molecule_Clean, "</b><br>Sp:", Species,
+                                "<br>Rel. to", input$ref_molecule,
+                                "(%):", round(Real_Value, 2)))
+    mol_order     <- unique(df_heat$Molecule_Clean)
+    species_order <- sort_phylogenetic_species(unique(df_heat$Species))
+    mol_masses    <- get_safe_masses(df_heat, mol_order)
+    generate_annotated_heatmap(df_heat, mol_order, species_order, mol_masses,
+                               marker_scale = input$marker_visual_scale)
+  })
+  
+  # --- Panel 4: Identification Table ---
+  output$id_table <- renderDT({
+    df <- processed_data()
+    req(nrow(df) > 0)
+    df <- df %>% filter(Molecule_Clean %in% input$selected_molecules)
+    table_out <- df %>%
+      select(Species, Family, Molecule_Clean, RT,
+             Exp_mz, Teo_mz, Frag_Type, Is_Char_Frag, Error_PPM, Raw_Area, Area) %>%
+      rename(
+        `Species / Stage`        = Species,
+        `Chemical Family`        = Family,
+        `Identified Betalain`    = Molecule_Clean,
+        `Retention Time (min)`   = RT,
+        `Experimental m/z`       = Exp_mz,
+        `Theoretical m/z`        = Teo_mz,
+        `Matched Fragment`       = Frag_Type,
+        `Char. Fragment?`        = Is_Char_Frag,
+        `Error (PPM)`            = Error_PPM,
+        `Raw Peak Area`          = Raw_Area,
+        `Normalized Area (per g)`= Area
+      ) %>%
+      arrange(`Species / Stage`, `Retention Time (min)`)
+    datatable(table_out,
+              options  = list(pageLength = 15, scrollX = TRUE),
+              rownames = FALSE,
+              class    = "cell-border stripe") %>%
+      formatRound(columns = c("Experimental m/z", "Theoretical m/z"), digits = 4) %>%
+      formatRound(columns = c("Retention Time (min)", "Error (PPM)"), digits = 2) %>%
+      formatSignif(columns = c("Raw Peak Area", "Normalized Area (per g)"), digits = 4)
+  })
+  
+  # --- Panel 5: Family bubbles ---
+  output$heatmapFamilyContainer <- renderUI({
+    h <- max(500, 300 + length(input$selected_species) * 50)
+    plotlyOutput("heatmapFamilyPlot", height = paste0(h, "px"))
+  })
+  output$heatmapFamilyPlot <- renderPlotly({
+    df_base <- get_base_df(); req(df_base)
+    df_mols <- df_base %>%
+      arrange(desc(A)) %>%
+      mutate(
+        Z_Value      = log10(A + 1),
+        Marker_Color = case_when(
+          grepl("cyan", tolower(Family)) ~ "rgba(236, 0, 140, 0.5)",
+          grepl("xant", tolower(Family)) ~ "rgba(255, 242, 0, 0.5)",
+          TRUE                           ~ "rgba(0, 174, 239, 0.5)"
+        ),
+        Hover_Text = paste("<b>", Molecule_Clean, "</b><br>Family:", Family,
+                           "<br>Sp:", Species,
+                           "<br>Area/g:", format(A, scientific = TRUE, digits = 3))
+      )
+    max_z   <- max(df_mols$Z_Value, na.rm = TRUE)
+    df_mols <- df_mols %>%
+      mutate(Marker_Size = if (max_z > 0) 6 + (sqrt(Z_Value / max_z) * 55 * input$marker_visual_scale) else 12)
+    
+    species_order <- sort_phylogenetic_species(unique(df_mols$Species))
+    family_order  <- sort(unique(df_mols$Family))
+    
+    plot_ly(
+      data = df_mols,
+      x = ~factor(Family,  levels = family_order),
+      y = ~factor(Species, levels = species_order),
+      type = "scatter", mode = "markers",
+      marker = list(size = ~Marker_Size, color = ~Marker_Color,
+                    line = list(color = "rgba(23,32,42,0.8)", width = 1),
+                    sizemode = "diameter"),
+      hoverinfo = "text", text = ~Hover_Text, showlegend = FALSE
+    ) %>%
+      layout(
+        xaxis = list(title = "", showline = TRUE, mirror = TRUE, linecolor = "black",
+                     linewidth = 1.5, tickfont = list(family = "Arial", size = 12, color = "black"),
+                     showgrid = TRUE, gridcolor = "#E5E8E8", gridwidth = 1.5),
+        yaxis = list(autorange = "reversed", title = "", showline = TRUE, mirror = TRUE,
+                     linecolor = "black", linewidth = 1.5,
+                     tickfont = list(family = "Arial", size = 11, color = "black"),
+                     showgrid = TRUE, gridcolor = "#E5E8E8", gridwidth = 1.5),
+        plot_bgcolor = "#ffffff", paper_bgcolor = "#ffffff",
+        margin = list(l = 220, b = 80, t = 40, r = 60)
+      ) %>% config(displayModeBar = TRUE)
+  })
+  
+  # --- Panel 6: Stacked bars (absolute) ---
+  output$barplotFamilyContainer <- renderUI({
+    h <- max(500, 300 + length(input$selected_species) * 50)
+    plotlyOutput("barplotFamily", height = paste0(h, "px"))
+  })
+  output$barplotFamily <- renderPlotly({
+    df_base <- get_base_df(); req(df_base)
+    df_summary <- df_base %>%
+      group_by(Species, Family) %>%
+      summarise(Total_A = sum(A, na.rm = TRUE), .groups = "drop") %>%
+      group_by(Species) %>%
+      mutate(
+        Total_Species = sum(Total_A, na.rm = TRUE),
+        Pct           = (Total_A / Total_Species) * 100,
+        Family_Group  = case_when(
+          grepl("cyan", tolower(Family)) ~ "Betacyanins",
+          grepl("xant", tolower(Family)) ~ "Betaxanthins",
+          TRUE                           ~ "Others / Precursors"
+        )
+      ) %>% ungroup()
+    species_order <- sort_phylogenetic_species(unique(df_summary$Species))
+    plot_ly(
+      data = df_summary,
+      y = ~factor(Species, levels = species_order), x = ~Total_A,
+      color = ~Family_Group,
+      colors = c("Betacyanins"       = "#EC008C",
+                 "Betaxanthins"      = "#FFF200",
+                 "Others / Precursors" = "#00AEEF"),
+      type = "bar", orientation = "h",
+      text = ~paste0(round(Pct, 1), "%"), textposition = "auto",
+      hoverinfo = "text",
+      hovertext = ~paste("<b>", Family_Group, "</b><br>Sp:", Species,
+                         "<br>Total Area/g:", format(Total_A, scientific = TRUE, digits = 3),
+                         "<br>Proportion:", round(Pct, 2), "%"),
+      marker = list(line = list(color = "#17202A", width = 1.2))
+    ) %>%
+      layout(
+        barmode = "stack",
+        xaxis = list(title = "Total Normalized Area (Area / g FW)",
+                     showline = TRUE, mirror = TRUE, linecolor = "black", linewidth = 1.5,
+                     tickfont = list(family = "Arial", size = 12, color = "black"),
+                     showgrid = TRUE, gridcolor = "#E5E8E8", gridwidth = 1.5),
+        yaxis = list(autorange = "reversed", title = "", showline = TRUE, mirror = TRUE,
+                     linecolor = "black", linewidth = 1.5,
+                     tickfont = list(family = "Arial", size = 11, color = "black")),
+        plot_bgcolor = "#ffffff", paper_bgcolor = "#ffffff",
+        margin = list(l = 220, b = 80, t = 40, r = 60),
+        legend = list(orientation = "h", xanchor = "center", x = 0.5, y = 1.05)
+      ) %>% config(displayModeBar = TRUE)
+  })
+  
+  # --- Panel 7: 100% stacked bars ---
+  output$barplotPercentContainer <- renderUI({
+    h <- max(500, 300 + length(input$selected_species) * 50)
+    plotlyOutput("barplotPercent", height = paste0(h, "px"))
+  })
+  
+  output$barplotPercent <- renderPlotly({
+    df_base <- get_base_df(); req(df_base)
+    df_summary <- df_base %>%
+      group_by(Species, Family) %>%
+      summarise(Total_A = sum(A, na.rm = TRUE), .groups = "drop") %>%
+      group_by(Species) %>%
+      mutate(
+        Total_Species = sum(Total_A, na.rm = TRUE),
+        Pct           = (Total_A / Total_Species) * 100,
+        Family_Group  = case_when(
+          grepl("cyan", tolower(Family)) ~ "Betacyanins",
+          grepl("xant", tolower(Family)) ~ "Betaxanthins",
+          TRUE                           ~ "Others / Precursors"
+        )
+      ) %>% ungroup()
+    
+    species_order <- sort_phylogenetic_species(unique(df_summary$Species))
+    
+    plot_ly(
+      data = df_summary,
+      y = ~factor(Species, levels = species_order), x = ~Pct,
+      color = ~Family_Group,
+      colors = c("Betacyanins"       = "#EC008C",
+                 "Betaxanthins"      = "#FFF200",
+                 "Others / Precursors" = "#00AEEF"),
+      type = "bar", orientation = "h",
+      text = ~paste0(round(Pct, 1), "%"), textposition = "auto",
+      hoverinfo = "text",
+      hovertext = ~paste("<b>", Family_Group, "</b><br>Sp:", Species,
+                         "<br>Proportion:", round(Pct, 2), "%",
+                         "<br>Absolute Area:", format(Total_A, scientific = TRUE, digits = 3)),
+      marker = list(line = list(color = "#17202A", width = 1.2))
+    ) %>%
+      layout(
+        font = list(family = "Arial", size = 11, color = "black"), 
+        barmode = "stack",
+        xaxis = list(
+          title = list(text = "Relative Proportion (%)", font = list(size = 11)),
+          showline = TRUE, mirror = TRUE, linecolor = "black", linewidth = 1.5,
+          tickfont = list(family = "Arial", size = 11, color = "black"),
+          showgrid = TRUE, gridcolor = "#E5E8E8", gridwidth = 1.5,
+          range = c(0, 100)
+        ),
+        yaxis = list(
+          autorange = "reversed", title = "", showline = TRUE, mirror = TRUE,
+          linecolor = "black", linewidth = 1.5,
+          tickfont = list(family = "Arial", size = 11, color = "black")
+        ),
+        plot_bgcolor = "#ffffff", paper_bgcolor = "#ffffff",
+        margin = list(l = 220, b = 80, t = 40, r = 60),
+        legend = list(
+          orientation = "h", xanchor = "center", x = 0.5, y = 1.05,
+          font = list(family = "Arial", size = 11, color = "black")
+        )
+      ) %>% 
+      config(
+        displayModeBar = TRUE,
+        toImageButtonOptions = list(
+          format = "svg",
+          filename = "Relative_Proportions_100Pct"
+        )
+      )
+  })
+  
+  # --- Export ---
+  output$downloadData <- downloadHandler(
+    filename = function() paste0("betalains_analysis_", Sys.Date(), ".xlsx"),
+    content  = function(file) write_xlsx(processed_data(), path = file)
+  )
+}
+
+shinyApp(ui, server)
